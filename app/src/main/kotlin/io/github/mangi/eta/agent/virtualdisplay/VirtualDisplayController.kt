@@ -62,7 +62,7 @@ internal object VirtualDisplayController {
 
     private var displayResources: VirtualDisplaySessionResources? = null
     private var latestFullBitmap: Bitmap? = null
-    private var lastUiFrameAtElapsedMs: Long = 0L
+    private var lastDecodedAtElapsedMs: Long = 0L
     private val mutedPackages = linkedSetOf<String>()
 
     fun isBackendAvailable(rootAvailable: Boolean, lsposedAvailable: Boolean): Boolean =
@@ -528,7 +528,7 @@ internal object VirtualDisplayController {
             displayResources = null
             latestFullBitmap?.let { if (!it.isRecycled) it.recycle() }
             latestFullBitmap = null
-            lastUiFrameAtElapsedMs = 0L
+            lastDecodedAtElapsedMs = 0L
             detached
         }
         if (resources != null) {
@@ -545,8 +545,16 @@ internal object VirtualDisplayController {
 
         try {
             val now = SystemClock.elapsedRealtime()
-            val minIntervalMs = if (highFrequencyPreview) 30L else 160L
-            val shouldUpdateUi = now - lastUiFrameAtElapsedMs >= minIntervalMs || latestFullBitmap == null
+            val intervalMs = VirtualDisplayFramePolicy.decodeIntervalMs(highFrequencyPreview)
+            val shouldDecode = synchronized(lock) {
+                VirtualDisplayFramePolicy.shouldDecode(
+                    nowElapsedMs = now,
+                    lastDecodedAtElapsedMs = lastDecodedAtElapsedMs,
+                    intervalMs = intervalMs,
+                    hasDecodedFrame = latestFullBitmap != null,
+                )
+            }
+            if (!shouldDecode) return
 
             val bitmap = decodeImageToBitmap(image) ?: return
             var oldBitmap: Bitmap? = null
@@ -557,16 +565,14 @@ internal object VirtualDisplayController {
                 }
                 oldBitmap = latestFullBitmap
                 latestFullBitmap = bitmap
-                if (shouldUpdateUi) {
-                    lastUiFrameAtElapsedMs = now
-                    val previewBitmap = createUiPreviewBitmap(bitmap)
-                    val current = mutableSnapshots.value
-                    if (current.active) {
-                        mutableSnapshots.value = current.copy(
-                            frame = previewBitmap.asImageBitmap(),
-                            frameSequence = frameSequenceGenerator.incrementAndGet(),
-                        )
-                    }
+                lastDecodedAtElapsedMs = now
+                val previewBitmap = createUiPreviewBitmap(bitmap)
+                val current = mutableSnapshots.value
+                if (current.active) {
+                    mutableSnapshots.value = current.copy(
+                        frame = previewBitmap.asImageBitmap(),
+                        frameSequence = frameSequenceGenerator.incrementAndGet(),
+                    )
                 }
             }
             oldBitmap?.let { old ->
