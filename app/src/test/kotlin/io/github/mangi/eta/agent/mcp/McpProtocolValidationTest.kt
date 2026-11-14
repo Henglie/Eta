@@ -12,6 +12,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -468,6 +469,83 @@ data: "id":1,"result":{"resultType":"complete","ttlMs":1000,"tools":[]}}
             server.stop(0)
         }
     }
+
+    @Test
+    fun modernDiscoveryReadsMoreThan128ToolsFromSinglePage() {
+        val server = localServer { exchange ->
+            val body = JSONObject(exchange.requestBody.bufferedReader().use { it.readText() })
+            exchange.respond(
+                200,
+                JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", body.getLong("id"))
+                    .put(
+                        "result",
+                        JSONObject()
+                            .put("resultType", "complete")
+                            .put("ttlMs", 1_000)
+                            .put("tools", toolsPage(page = 0, count = 229)),
+                    )
+                    .toString(),
+            )
+        }
+        try {
+            val configured = McpServerSetting(id = "test", name = "Test", url = server.url())
+            val discovery = McpHttpClient(configured, bearerToken = null).use { it.discoverTools() }
+
+            assertEquals(229, discovery.tools.size)
+            assertEquals("tool-0-0", discovery.tools.first().name)
+            assertEquals("tool-0-228", discovery.tools.last().name)
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun modernDiscoveryFollowsNextCursorBeyond128Tools() {
+        val requestCount = AtomicInteger()
+        val server = localServer { exchange ->
+            val body = JSONObject(exchange.requestBody.bufferedReader().use { it.readText() })
+            val cursor = body.getJSONObject("params").optString("cursor")
+            val page = if (cursor.isBlank()) 0 else cursor.removePrefix("p").toInt()
+            requestCount.incrementAndGet()
+            val result = JSONObject()
+                .put("resultType", "complete")
+                .put("ttlMs", 1_000)
+                .put("tools", toolsPage(page = page, count = 20))
+            if (page < 8) result.put("nextCursor", "p${page + 1}")
+            exchange.respond(
+                200,
+                JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", body.getLong("id"))
+                    .put("result", result)
+                    .toString(),
+            )
+        }
+        try {
+            val configured = McpServerSetting(id = "test", name = "Test", url = server.url())
+            val discovery = McpHttpClient(configured, bearerToken = null).use { it.discoverTools() }
+
+            assertEquals(9, requestCount.get())
+            assertEquals(180, discovery.tools.size)
+            assertEquals("tool-0-0", discovery.tools.first().name)
+            assertEquals("tool-8-19", discovery.tools.last().name)
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    private fun toolsPage(page: Int, count: Int): JSONArray =
+        JSONArray().apply {
+            repeat(count) { index ->
+                put(
+                    JSONObject()
+                        .put("name", "tool-$page-$index")
+                        .put("inputSchema", JSONObject().put("type", "object"))
+                )
+            }
+        }
 
     private fun localServer(handler: (HttpExchange) -> Unit): HttpServer =
         HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
